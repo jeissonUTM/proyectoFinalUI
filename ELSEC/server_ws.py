@@ -2,26 +2,14 @@
 server_ws.py
 ============
 Servidor WebSocket que corre el reconocimiento de señas en tiempo real
-usando el modelo lsec_model.tflite, envía la palabra traducida y también
-los frames de video codificados en base64 para mostrarlos en Flutter.
-
-CORRECCIÓN (parpadeo + cámara que no se apaga):
-El bucle principal antes NUNCA escuchaba mensajes entrantes del cliente
-(solo hacía `send`), así que el servidor no se enteraba de que Flutter
-quería detener la traducción hasta que un `send` fallaba por conexión
-cerrada -> la cámara seguía prendida un rato de más.
-
-Ahora se lanza una tarea en paralelo (`escuchar_stop`) que queda
-esperando mensajes del cliente. En cuanto Flutter manda {"type":"stop"}
-o cierra el socket, se activa un `asyncio.Event` y el bucle principal
-lo revisa en cada iteración para cortar y liberar la cámara al toque.
+usando el modelo lsec_model.tflite. Flutter captura la cámara local y
+envía cada frame JPEG como mensaje binario por WebSocket.
 """
 
 import asyncio
 import json
 import os
 import time
-import base64
 from http import HTTPStatus
 import cv2
 import numpy as np
@@ -76,29 +64,6 @@ def preprocesar_para_modelo(seq_cruda: np.ndarray) -> np.ndarray:
     return remuestrear_secuencia(seq_norm, config.SEQUENCE_LENGTH)
 
 
-async def escuchar_stop(websocket, evento_stop: asyncio.Event):
-    """Corre en paralelo al bucle de cámara. Se queda esperando mensajes
-    entrantes del cliente (Flutter). En cuanto llega {"type":"stop"} o
-    el socket se cierra desde el otro lado, activa evento_stop para que
-    el bucle principal corte y libere la cámara de inmediato."""
-    try:
-        async for mensaje in websocket:
-            try:
-                data = json.loads(mensaje)
-            except (json.JSONDecodeError, TypeError):
-                continue
-            if data.get("type") == "stop":
-                print("Stop recibido desde Flutter, liberando cámara...")
-                evento_stop.set()
-                break
-    except websockets.exceptions.ConnectionClosed:
-        pass
-    finally:
-        # Si el socket se cerró sin mandar "stop" explícito, igual
-        # cortamos el bucle principal.
-        evento_stop.set()
-
-
 def responder_http(connection, request):
     """Responde a las sondas HTTP de Render sin interferir con WebSocket."""
     if request.headers.get("Upgrade", "").lower() != "websocket":
@@ -108,9 +73,6 @@ def responder_http(connection, request):
 
 async def manejar_cliente(websocket):
     print(f"Cliente conectado: {websocket.remote_address}")
-
-    evento_stop = asyncio.Event()
-    tarea_escucha = asyncio.create_task(escuchar_stop(websocket, evento_stop))
 
     # Cargar modelo TFLite
     print("Cargando modelo TFLite...")
@@ -125,21 +87,24 @@ async def manejar_cliente(websocket):
     cooldown = 2.0
     umbral = 0.80
 
-    frame_counter = 0
-    FRAME_INTERVAL = 2  # enviar un frame cada 2 iteraciones (~15 FPS si la cámara va a 30)
-
-    cap = None
     try:
         with ExtractorKeypoints(running_mode=VisionRunningMode.VIDEO) as extractor:
-            cap = cv2.VideoCapture(0)
             t0 = time.time()
 
-            while not evento_stop.is_set():
-                ok, frame = cap.read()
-                if not ok:
-                    break
+            async for mensaje in websocket:
+                if isinstance(mensaje, str):
+                    try:
+                        if json.loads(mensaje).get("type") == "stop":
+                            break
+                    except json.JSONDecodeError:
+                        pass
+                    continue
 
-                frame = cv2.flip(frame, 1)
+                frame = cv2.imdecode(
+                    np.frombuffer(mensaje, dtype=np.uint8), cv2.IMREAD_COLOR
+                )
+                if frame is None:
+                    continue
                 timestamp_ms = int((time.time() - t0) * 1000)
 
                 vec = extractor.process_bgr_frame(frame, timestamp_ms)
@@ -148,15 +113,6 @@ async def manejar_cliente(websocket):
                 mano_detectada = bool(np.any(porcion_manos != 0))
 
                 resultado = segmentador.procesar(vec, mano_detectada)
-
-                frame_counter += 1
-                if frame_counter % FRAME_INTERVAL == 0:
-                    _, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
-                    jpeg_b64 = base64.b64encode(jpeg.tobytes()).decode('utf-8')
-                    await websocket.send(json.dumps({
-                        "type": "frame",
-                        "data": jpeg_b64
-                    }))
 
                 if resultado is not None:
                     entrada = preprocesar_para_modelo(resultado)
@@ -183,26 +139,17 @@ async def manejar_cliente(websocket):
                         ultima_palabra = palabra
                         ultima_vez = ahora
 
-                # Cede el control al event loop en cada vuelta. Esto es
-                # lo que permite que la tarea `escuchar_stop` (y por lo
-                # tanto la detección del cierre/stop) se procese casi al
-                # instante, en vez de recién en el próximo `send`.
-                await asyncio.sleep(0)
-
     except websockets.exceptions.ConnectionClosed:
         print("Cliente desconectado")
     finally:
-        if cap is not None:
-            cap.release()
-        tarea_escucha.cancel()
-        print("Cámara liberada.")
+        print("Cliente finalizó la traducción.")
 
 
 async def main():
     host = "0.0.0.0"
     port = int(os.environ.get("PORT", "8765"))
     async with websockets.serve(
-        manejar_cliente, host, port, process_request=responder_http
+        manejar_cliente, host, port, process_request=responder_http, max_size=2 * 1024 * 1024
     ):
         print(f"Servidor WebSocket iniciado en ws://{host}:{port}")
         print("Esperando conexión de Flutter... (envía video y predicciones)")
