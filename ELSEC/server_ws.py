@@ -22,6 +22,7 @@ import json
 import os
 import time
 import base64
+from http import HTTPStatus
 import cv2
 import numpy as np
 from tflite_runtime.interpreter import Interpreter
@@ -96,6 +97,13 @@ async def escuchar_stop(websocket, evento_stop: asyncio.Event):
         # Si el socket se cerró sin mandar "stop" explícito, igual
         # cortamos el bucle principal.
         evento_stop.set()
+
+
+def responder_http(connection, request):
+    """Responde a las sondas HTTP de Render sin interferir con WebSocket."""
+    if request.headers.get("Upgrade", "").lower() != "websocket":
+        return connection.respond(HTTPStatus.OK, "Servicio WebSocket activo.\n")
+    return None
 
 
 async def manejar_cliente(websocket):
@@ -193,7 +201,9 @@ async def manejar_cliente(websocket):
 async def main():
     host = "0.0.0.0"
     port = int(os.environ.get("PORT", "8765"))
-    async with websockets.serve(manejar_cliente, host, port):
+    async with websockets.serve(
+        manejar_cliente, host, port, process_request=responder_http
+    ):
         print(f"Servidor WebSocket iniciado en ws://{host}:{port}")
         print("Esperando conexión de Flutter... (envía video y predicciones)")
         await asyncio.Future()
