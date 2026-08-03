@@ -24,7 +24,7 @@ import time
 import base64
 import cv2
 import numpy as np
-import tensorflow as tf
+import tflite_runtime.interpreter as tflite
 import websockets
 from importlib import import_module
 
@@ -106,7 +106,7 @@ async def manejar_cliente(websocket):
 
     # Cargar modelo TFLite
     print("Cargando modelo TFLite...")
-    interpreter = tf.lite.Interpreter(model_path=config.TFLITE_MODEL_PATH)
+    interpreter = tflite.Interpreter(model_path=config.TFLITE_MODEL_PATH)
     interpreter.allocate_tensors()
     input_details = interpreter.get_input_details()
     output_details = interpreter.get_output_details()

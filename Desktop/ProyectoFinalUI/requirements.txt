@@ -1,7 +1,7 @@
 mediapipe>=0.10.30
 opencv-python>=4.9
-numpy>=1.26,<2.0
-scipy>=1.11
-tensorflow>=2.13,<2.17
+numpy>=1.24,<1.26
+scipy>=1.10
+tflite-runtime>=2.14
 pyttsx3>=2.90
 websockets>=12.0
