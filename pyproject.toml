@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "traductor-senas"
+version = "1.0.0"
+description = "Sign Language Translator with Real-time Recognition"
+requires-python = ">=3.10,<3.11"
+dependencies = [
+    "mediapipe>=0.10.30",
+    "opencv-python>=4.9",
+    "numpy>=1.24,<1.26",
+    "scipy>=1.10",
+    "tflite-runtime>=2.14",
+    "pyttsx3>=2.90",
+    "websockets>=12.0",
+]
