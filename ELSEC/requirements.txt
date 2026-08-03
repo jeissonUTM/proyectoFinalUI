@@ -2,7 +2,8 @@ mediapipe>=0.10.30
 opencv-python>=4.9
 numpy>=1.24,<1.26
 scipy>=1.10
-tflite-runtime>=2.14
+# Usamos tflite-runtime en vez de tensorflow completo para el servidor.
+# La versión debe coincidir con la de TF usada para convertir el modelo.
+tflite-runtime==2.14.0
 pyttsx3>=2.90
-websockets>=12.0
 websockets>=12.0
