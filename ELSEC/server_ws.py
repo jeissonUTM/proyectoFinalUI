@@ -79,73 +79,67 @@ async def responder_http(path, request_headers):
     return None  # Continuar con el handler de WebSocket
 
 
-async def manejar_cliente(websocket):
+async def manejar_cliente(websocket, interpreter, extractor):
     print(f"Cliente conectado: {websocket.remote_address}")
-
-    # Cargar modelo TFLite
-    print("Cargando modelo TFLite...")
-    interpreter = Interpreter(model_path=config.TFLITE_MODEL_PATH)
-    interpreter.allocate_tensors()
     input_details = interpreter.get_input_details()
     output_details = interpreter.get_output_details()
 
     segmentador = SegmentadorSenas()
     ultima_palabra = None
     ultima_vez = 0.0
-    cooldown = 2.0
-    umbral = 0.80
+    cooldown = 2.0  # Segundos antes de repetir la misma palabra
+    umbral = 0.80   # Confianza mínima para mostrar la predicción
 
     try:
-        with ExtractorKeypoints(running_mode=VisionRunningMode.VIDEO) as extractor:
-            t0 = time.time()
+        t0 = time.time()
 
-            async for mensaje in websocket:
-                if isinstance(mensaje, str):
-                    try:
-                        if json.loads(mensaje).get("type") == "stop":
-                            break
-                    except json.JSONDecodeError:
-                        pass
-                    continue
+        async for mensaje in websocket:
+            if isinstance(mensaje, str):
+                try:
+                    if json.loads(mensaje).get("type") == "stop":
+                        break
+                except json.JSONDecodeError:
+                    pass
+                continue
 
-                frame = cv2.imdecode(
-                    np.frombuffer(mensaje, dtype=np.uint8), cv2.IMREAD_COLOR
-                )
-                if frame is None:
-                    continue
-                timestamp_ms = int((time.time() - t0) * 1000)
+            frame = cv2.imdecode(
+                np.frombuffer(mensaje, dtype=np.uint8), cv2.IMREAD_COLOR
+            )
+            if frame is None:
+                continue
+            timestamp_ms = int((time.time() - t0) * 1000)
 
-                vec = extractor.process_bgr_frame(frame, timestamp_ms)
+            vec = extractor.process_bgr_frame(frame, timestamp_ms)
 
-                porcion_manos = vec[config.POSE_FEATS:]
-                mano_detectada = bool(np.any(porcion_manos != 0))
+            porcion_manos = vec[config.POSE_FEATS:]
+            mano_detectada = bool(np.any(porcion_manos != 0))
 
-                resultado = segmentador.procesar(vec, mano_detectada)
+            resultado = segmentador.procesar(vec, mano_detectada)
 
-                if resultado is not None:
-                    entrada = preprocesar_para_modelo(resultado)
-                    entrada = np.expand_dims(entrada, axis=0).astype(np.float32)
+            if resultado is not None:
+                entrada = preprocesar_para_modelo(resultado)
+                entrada = np.expand_dims(entrada, axis=0).astype(np.float32)
 
-                    interpreter.set_tensor(input_details[0]['index'], entrada)
-                    interpreter.invoke()
-                    probs = interpreter.get_tensor(output_details[0]['index'])[0]
+                interpreter.set_tensor(input_details[0]['index'], entrada)
+                interpreter.invoke()
+                probs = interpreter.get_tensor(output_details[0]['index'])[0]
 
-                    idx = int(np.argmax(probs))
-                    confianza = float(probs[idx])
-                    palabra = config.VOCABULARY[idx]
+                idx = int(np.argmax(probs))
+                confianza = float(probs[idx])
+                palabra = config.VOCABULARY[idx]
 
-                    ahora = time.time()
-                    es_repetida = (palabra == ultima_palabra) and (ahora - ultima_vez < cooldown)
+                ahora = time.time()
+                es_repetida = (palabra == ultima_palabra) and (ahora - ultima_vez < cooldown)
 
-                    if confianza >= umbral and not es_repetida:
-                        print(f"Enviando: {palabra} ({confianza*100:.1f}%)")
-                        await websocket.send(json.dumps({
-                            "type": "prediction",
-                            "palabra": palabra,
-                            "confianza": confianza
-                        }))
-                        ultima_palabra = palabra
-                        ultima_vez = ahora
+                if confianza >= umbral and not es_repetida:
+                    print(f"Enviando: {palabra} ({confianza*100:.1f}%)")
+                    await websocket.send(json.dumps({
+                        "type": "prediction",
+                        "palabra": palabra,
+                        "confianza": confianza
+                    }))
+                    ultima_palabra = palabra
+                    ultima_vez = ahora
 
     except websockets.exceptions.ConnectionClosed:
         print("Cliente desconectado")
@@ -154,14 +148,28 @@ async def manejar_cliente(websocket):
 
 
 async def main():
+    # Cargar los modelos UNA SOLA VEZ al inicio.
+    print("Cargando modelo TFLite...")
+    interpreter = Interpreter(model_path=config.TFLITE_MODEL_PATH)
+    interpreter.allocate_tensors()
+
+    print("Cargando extractor de keypoints de MediaPipe...")
+    extractor = ExtractorKeypoints(running_mode=VisionRunningMode.VIDEO)
+
+    # Crear un handler parcial que ya tenga los modelos cargados.
+    # Cada nueva conexión llamará a `manejar_cliente` con estos objetos.
+    handler_con_modelos = lambda ws: manejar_cliente(ws, interpreter, extractor)
+
     host = "0.0.0.0"
     port = int(os.environ.get("PORT", "8765"))
-    async with websockets.serve(
-        manejar_cliente, host, port, process_request=responder_http, max_size=1024 * 1024
-    ):
-        print(f"Servidor WebSocket iniciado en ws://{host}:{port}")
-        print("Esperando conexión de Flutter... (envía video y predicciones)")
-        await asyncio.Future()
+    try:
+        async with websockets.serve(
+            handler_con_modelos, host, port, process_request=responder_http, max_size=1024 * 1024
+        ):
+            print(f"Servidor WebSocket iniciado en ws://{host}:{port}")
+            await asyncio.Future()  # Mantener el servidor corriendo indefinidamente
+    finally:
+        extractor.close()
 
 
 if __name__ == "__main__":
