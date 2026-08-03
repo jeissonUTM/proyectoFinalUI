@@ -4,6 +4,6 @@ numpy>=1.24,<1.26
 scipy>=1.10
 # Usamos tflite-runtime en vez de tensorflow completo para el servidor.
 # La versión debe coincidir con la de TF usada para convertir el modelo.
-tflite-runtime==2.16.0
+tflite-runtime==2.15.0
 pyttsx3>=2.90
 websockets>=12.0
